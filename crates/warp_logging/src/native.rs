@@ -294,31 +294,58 @@ pub struct InlineFile {
     pub contents: String,
 }
 
-/// Creates a timestamped zip archive containing the current log file
-/// and any older logs for the active instance.
-///
-/// `extras` 让调用方追加其它诊断产物(MCP 日志、自动更新日志、诊断摘要等);
-/// 任何不存在或无法读取的额外文件都会被跳过并通过 `log::warn!` 记录,
-/// 不会让整个导出失败。
-pub fn create_log_bundle_zip(extras: LogBundleExtras) -> Result<PathBuf> {
-    let log_files = current_and_rotated_log_paths()?;
-    let log_directory = log_directory()?;
+/// 默认 zip 文件名(用于"导出到日志目录"流程,以及作为 save-file picker
+/// 的默认文件名)。形如 `openwarp-20260518-093000.zip`。
+pub fn default_log_bundle_filename() -> String {
     let logfile_name = ChannelState::logfile_name();
     let logfile_stem = logfile_name.strip_suffix(".log").unwrap_or(&logfile_name);
-
-    let zip_path = log_directory.join(format!(
+    format!(
         "{logfile_stem}-{}.zip",
         Local::now().format("%Y%m%d-%H%M%S")
-    ));
-    if zip_path.exists() {
-        let error_message = format!(
-            "New log zip path conflicts with an existing zip: {}",
-            zip_path.display()
-        );
-        return Err(anyhow::anyhow!("{error_message}"));
+    )
+}
+
+/// 把调用方提供的 entry name 规范化为安全的 zip 内部相对路径,防御 path traversal:
+/// - 反斜杠统一为 `/`;
+/// - 拒绝绝对路径 / Windows 盘符;
+/// - 剥离 `..` 父级组件以及连续的 `/` / `.`;
+/// - 空串视为非法。
+///
+/// 返回 `None` 表示该 entry 应被跳过(调用方会 log::warn! 并 continue)。
+fn sanitize_zip_entry_name(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    // 统一分隔符。
+    let normalized = name.replace('\\', "/");
+
+    // 检查 Windows 盘符,如 `C:/foo`。
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return None;
     }
 
-    let zip_file = File::create(&zip_path)?;
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in normalized.split('/') {
+        match segment {
+            "" | "." => continue, // 连续 `/` 或 `./`,丢弃。
+            ".." => return None,  // 不允许跳出。
+            other => parts.push(other),
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
+/// 实际把日志 + extras 写入指定 zip 输出路径的核心实现。
+/// 公开的 `create_log_bundle_zip` 与 `write_log_bundle_zip_to` 都委托到这里。
+fn write_log_bundle_zip_inner(zip_path: &Path, extras: &LogBundleExtras) -> Result<()> {
+    let log_files = current_and_rotated_log_paths()?;
+
+    let zip_file = File::create(zip_path)?;
     let mut zip_writer = ZipWriter::new(zip_file);
     let zip_options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
@@ -339,26 +366,31 @@ pub fn create_log_bundle_zip(extras: LogBundleExtras) -> Result<PathBuf> {
         if !extra.source_path.is_file() {
             continue;
         }
+        let source_display = extra.source_path.display();
+        let Some(safe_entry) = sanitize_zip_entry_name(&extra.entry_name) else {
+            let raw = &extra.entry_name;
+            log::warn!(
+                "Skipping extra log file {source_display}: invalid zip entry name {raw:?}"
+            );
+            continue;
+        };
         match File::open(&extra.source_path) {
             Ok(mut source) => {
-                if let Err(err) = zip_writer.start_file(&extra.entry_name, zip_options) {
+                if let Err(err) = zip_writer.start_file(&safe_entry, zip_options) {
                     log::warn!(
-                        "Skipping extra log file {} in bundle: {err}",
-                        extra.source_path.display()
+                        "Skipping extra log file {source_display} in bundle: {err}"
                     );
                     continue;
                 }
                 if let Err(err) = copy(&mut source, &mut zip_writer) {
                     log::warn!(
-                        "Failed to write extra log file {} into bundle: {err}",
-                        extra.source_path.display()
+                        "Failed to write extra log file {source_display} into bundle: {err}"
                     );
                 }
             }
             Err(err) => {
                 log::warn!(
-                    "Failed to open extra log file {} for bundle: {err}",
-                    extra.source_path.display()
+                    "Failed to open extra log file {source_display} for bundle: {err}"
                 );
             }
         }
@@ -366,23 +398,57 @@ pub fn create_log_bundle_zip(extras: LogBundleExtras) -> Result<PathBuf> {
 
     // 内存内容 (`manifest.txt` 等):始终尝试写入。
     for inline in &extras.inline_files {
-        if let Err(err) = zip_writer.start_file(&inline.entry_name, zip_options) {
-            log::warn!(
-                "Failed to start inline entry {} in bundle: {err}",
-                inline.entry_name
-            );
+        let raw_name = &inline.entry_name;
+        let Some(safe_entry) = sanitize_zip_entry_name(raw_name) else {
+            log::warn!("Skipping inline entry: invalid zip entry name {raw_name:?}");
+            continue;
+        };
+        if let Err(err) = zip_writer.start_file(&safe_entry, zip_options) {
+            log::warn!("Failed to start inline entry {safe_entry} in bundle: {err}");
             continue;
         }
         if let Err(err) = zip_writer.write_all(inline.contents.as_bytes()) {
-            log::warn!(
-                "Failed to write inline entry {} into bundle: {err}",
-                inline.entry_name
-            );
+            log::warn!("Failed to write inline entry {safe_entry} into bundle: {err}");
         }
     }
 
     zip_writer.finish()?;
+    Ok(())
+}
+
+/// Creates a timestamped zip archive containing the current log file
+/// and any older logs for the active instance, written into the active
+/// log directory. Returns the resulting zip path.
+///
+/// 用于"打包后在文件管理器中显示"的入口(Help 菜单 → View Warp Logs)。
+///
+/// `extras` 让调用方追加其它诊断产物(MCP 日志、自动更新日志、诊断摘要等);
+/// 任何不存在或无法读取的额外文件都会被跳过并通过 `log::warn!` 记录,
+/// 不会让整个导出失败。
+pub fn create_log_bundle_zip(extras: LogBundleExtras) -> Result<PathBuf> {
+    let log_directory = log_directory()?;
+    let zip_path = log_directory.join(default_log_bundle_filename());
+    if zip_path.exists() {
+        let error_message = format!(
+            "New log zip path conflicts with an existing zip: {}",
+            zip_path.display()
+        );
+        return Err(anyhow::anyhow!("{error_message}"));
+    }
+    write_log_bundle_zip_inner(&zip_path, &extras)?;
     Ok(zip_path)
+}
+
+/// Writes a log bundle zip directly to `output_path` (overwriting if it
+/// already exists, mirroring the save-file picker contract).
+///
+/// 用于"用户在保存对话框中选择路径"的入口(设置 → 关于 → 导出日志)。
+/// 与 `create_log_bundle_zip` 共享相同的打包内容与失败容忍策略。
+pub fn write_log_bundle_zip_to(
+    output_path: impl AsRef<Path>,
+    extras: LogBundleExtras,
+) -> Result<()> {
+    write_log_bundle_zip_inner(output_path.as_ref(), &extras)
 }
 
 fn temp_log_file_path(log_directory: impl AsRef<Path>) -> PathBuf {

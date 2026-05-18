@@ -33,11 +33,10 @@ pub enum AboutPageAction {
     CheckForUpdate,
     /// 用户点击"前往 GitHub 下载"链接:用系统默认浏览器打开 release 页面。
     OpenReleasePage(String),
-    /// 用户点击"导出日志"链接:打包当前 / 上次会话主日志、MCP 日志、
-    /// 自动更新器日志以及一份诊断摘要为 zip,然后在文件管理器中显示该 zip,
-    /// 方便用户复制 / 拖拽分享给排查人员。复用 `WorkspaceAction::ViewLogs`
-    /// 的现有实现,以保持与"帮助菜单 → View Warp Logs"行为一致并复用其
-    /// 错误 toast。
+    /// 用户点击"导出日志"链接:弹出原生 save-file 对话框,用户选择保存
+    /// 位置后将主日志、MCP 日志、自动更新器日志以及诊断摘要打包为 zip
+    /// 直接写入用户指定的路径,完成后通过 workspace toast 反馈成功 / 失败。
+    /// 由 `WorkspaceAction::ExportLogsToPath` 负责实现。
     #[cfg(not(target_family = "wasm"))]
     ExportLogs,
 }
@@ -88,9 +87,9 @@ impl TypedActionView for AboutPageView {
             }
             #[cfg(not(target_family = "wasm"))]
             AboutPageAction::ExportLogs => {
-                // 委托给已经存在的 WorkspaceAction::ViewLogs:它会异步打包 zip
-                // 并在文件管理器中定位,失败时还会通过 workspace toast 提示。
-                ctx.dispatch_typed_action(&WorkspaceAction::ViewLogs);
+                // 触发 workspace 层弹出 save-file 对话框、由用户选择保存路径
+                // 后完成打包与 toast 反馈。
+                ctx.dispatch_typed_action(&WorkspaceAction::ExportLogsToPath);
             }
         }
     }

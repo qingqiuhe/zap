@@ -5500,6 +5500,86 @@ impl Workspace {
         );
     }
 
+    /// 与 `view_logs` 不同:让用户通过系统原生 save-file 对话框选择保存位置,
+    /// 然后把日志包直接写到该位置。打包内容与 `view_logs` 完全一致。
+    ///
+    /// 失败 / 成功都通过 `toast_stack` 反馈,以便在设置页这种没有自己 toast
+    /// 区域的视图也能看到结果。
+    #[cfg(not(target_family = "wasm"))]
+    fn export_logs_to_path(&mut self, ctx: &mut ViewContext<Self>) {
+        use warpui::platform::SaveFilePickerConfiguration;
+
+        // 在调用线程同步采集 extras(读取 AppContext 全局状态),保存对话框
+        // 与实际写盘都在后续异步流程中。
+        let extras = Self::collect_log_bundle_extras(ctx);
+        let default_filename = warp_logging::default_log_bundle_filename();
+        let default_directory = dirs::download_dir().or_else(dirs::home_dir);
+
+        let mut config = SaveFilePickerConfiguration::new().with_default_filename(default_filename);
+        if let Some(directory) = default_directory {
+            config = config.with_default_directory(directory);
+        }
+
+        ctx.open_save_file_picker(
+            move |path_opt, _me, ctx| {
+                let Some(path_string) = path_opt else {
+                    // 用户取消,不打扰用户。
+                    return;
+                };
+                let output_path = std::path::PathBuf::from(path_string);
+                ctx.spawn(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            warp_logging::write_log_bundle_zip_to(&output_path, extras)
+                                .map(|()| output_path)
+                        })
+                        .await
+                    },
+                    |me, result, ctx| match result {
+                        Ok(Ok(path)) => {
+                            // i18n_embed_fl::fl! 要求位置参数活到 macro 展开结束,
+                            // 故先 `let` 绑定到本作用域的 String,再借用其 &str。
+                            let path_str = path.display().to_string();
+                            let message = crate::t!(
+                                "settings-about-export-logs-success",
+                                path = path_str.as_str()
+                            );
+                            me.toast_stack.update(ctx, |toast_stack, ctx| {
+                                let toast = DismissibleToast::success(message);
+                                toast_stack.add_persistent_toast(toast, ctx);
+                            });
+                        }
+                        Ok(Err(err)) => {
+                            log::error!("Failed to export log bundle: {err}");
+                            let error_str = format!("{err}");
+                            let message = crate::t!(
+                                "settings-about-export-logs-failure",
+                                error = error_str.as_str()
+                            );
+                            me.toast_stack.update(ctx, |toast_stack, ctx| {
+                                let toast = DismissibleToast::error(message);
+                                toast_stack.add_persistent_toast(toast, ctx);
+                            });
+                        }
+                        Err(err) => {
+                            log::error!("Failed to export log bundle: {err}");
+                            let error_str = format!("{err}");
+                            let message = crate::t!(
+                                "settings-about-export-logs-failure",
+                                error = error_str.as_str()
+                            );
+                            me.toast_stack.update(ctx, |toast_stack, ctx| {
+                                let toast = DismissibleToast::error(message);
+                                toast_stack.add_persistent_toast(toast, ctx);
+                            });
+                        }
+                    },
+                );
+            },
+            config,
+        );
+    }
+
     /// 收集本次"导出日志"要附加进 zip 的诊断材料:
     ///
     /// - `manifest.txt`:版本 / channel / 平台 / arch / 执行模式 / 生成时间戳;
@@ -5520,6 +5600,8 @@ impl Workspace {
         let log_dir = warp_logging::log_directory().ok();
 
         // 1) manifest.txt:可读的诊断摘要,排查问题时第一眼看的内容。
+        // 日志目录用 `home_relative_path` 脱敏(在 Unix 下把 `$HOME` 替换为 `~`),
+        // 避免分享 zip 给排查人员时泄露用户名 / 真实家目录路径。
         let manifest = {
             let version = ChannelState::app_version().unwrap_or("Dev");
             let channel = ChannelState::channel();
@@ -5527,7 +5609,7 @@ impl Workspace {
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
             let log_dir_str = log_dir
                 .as_ref()
-                .map(|p| p.display().to_string())
+                .map(|p| warp_core::paths::home_relative_path(p))
                 .unwrap_or_else(|| "<unknown>".to_string());
 
             format!(
@@ -18508,6 +18590,8 @@ impl TypedActionView for Workspace {
             SendFeedback => self.send_feedback(ctx),
             #[cfg(not(target_family = "wasm"))]
             ViewLogs => self.view_logs(ctx),
+            #[cfg(not(target_family = "wasm"))]
+            ExportLogsToPath => self.export_logs_to_path(ctx),
             ChangeCursor(cursor) => self.change_cursor(*cursor, ctx),
             ToggleErrorUnderlining => self.toggle_error_underlining(ctx),
             ToggleSyntaxHighlighting => self.toggle_syntax_highlighting(ctx),
