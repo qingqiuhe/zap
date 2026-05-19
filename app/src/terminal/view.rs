@@ -360,7 +360,7 @@ use warpui::elements::new_scrollable::{
     ScrollableAppearance, SingleAxisConfig,
 };
 use warpui::elements::{
-    get_rich_content_position_id, ChildAnchor, ClippedScrollStateHandle, Container,
+    get_rich_content_position_id, Border, ChildAnchor, ClippedScrollStateHandle, Container,
     CrossAxisAlignment, DispatchEventResult, DropTarget, DropTargetData, Empty, EventHandler, Flex,
     NewScrollable, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds,
     PositionedElementAnchor, PositionedElementOffsetBounds, Radius, ScrollableElement,
@@ -404,7 +404,10 @@ use crate::banner::{
     DismissalType,
 };
 use crate::debounce::debounce;
-use crate::editor::{AutosuggestionType, CrdtOperation, EditorAction};
+use crate::editor::{
+    AutosuggestionType, CrdtOperation, EditorAction, EditorView, Event as EditorEvent,
+    PropagateAndNoOpEscapeKey, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions, TextOptions,
+};
 use crate::features::FeatureFlag;
 use crate::pane_group::SplitPaneState;
 use crate::pane_group::{
@@ -475,11 +478,13 @@ use crate::terminal::{
     TerminalModel,
 };
 use crate::view_components::find::{Event as FindEvent, Find, FindDirection, FindWithinBlockState};
+use fuzzy_match::match_indices_case_insensitive;
 use settings::{Setting, ToggleableSetting};
 use warp_core::semantic_selection::SemanticSelection;
+use warp_editor::editor::NavigationKey;
 use warpui::text::SelectionType;
 
-use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields};
+use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
 use crate::server::telemetry::{BlockLatencyInfo, BootstrappingInfo};
 use crate::terminal::{block_list_element::BlockListMenuSource, prompt};
 use crate::terminal::{color, History, SizeInfo};
@@ -651,10 +656,17 @@ const P10K_UPDATE_INSTRUCTIONS_URL: &str =
     "https://github.com/romkatv/powerlevel10k#how-do-i-update-powerlevel10k";
 
 const CONTEXT_MENU_WIDTH: f32 = 280.;
-const ONEKEY_CONTEXT_MENU_WIDTH: f32 = 320.;
+const ONEKEY_CONTEXT_MENU_WIDTH: f32 = 380.;
 const ONEKEY_PROMPT_THROTTLE: Duration = Duration::from_secs(2);
 const ONEKEY_PROMPT_SLIDING_WINDOW_BYTES: usize = 8 * 1024;
 const ONEKEY_PROMPT_BUFFER_HARD_LIMIT: usize = 16 * 1024;
+/// 每条 OneKey 候选行的估算高度(stacked label + padding),用于按候选数量
+/// 推导 Scrollable 菜单的目标高度。仅作启发,不需要像素精确。
+const ONEKEY_MENU_ROW_HEIGHT: f32 = 44.;
+/// OneKey 菜单顶部搜索 header 的估算高度(icon + EditorView + padding + border)。
+const ONEKEY_SEARCH_HEADER_HEIGHT: f32 = 32.;
+/// OneKey 菜单 Scrollable 区域的最大高度,避免几十/几百条凭据时盖住终端。
+const ONEKEY_MENU_MAX_HEIGHT: f32 = 360.;
 
 /// The minimum amount of mouse-drag to consider a selection to
 /// be a text-selection as opposed to mouse-drag noise.
@@ -2306,6 +2318,13 @@ pub struct TerminalView {
     context_menu_state: Option<ContextMenuState>,
     onekey_prompt_candidates: Vec<OneKeyPromptCandidate>,
     onekey_last_prompt_at: Option<Instant>,
+    /// OneKey 菜单顶部的搜索输入框。常驻字段,与 TerminalView 同生命周期;
+    /// 菜单关闭时通过 `clear_buffer` 重置内容,而不是销毁 ViewHandle——
+    /// 因为框架未提供 view 释放 API,丢弃 handle 不会注销订阅,
+    /// 反复创建会泄漏并让旧订阅干扰新菜单。
+    onekey_search_editor: ViewHandle<EditorView>,
+    /// 当前 OneKey 搜索框中的查询字符串,影响菜单 items 列表的过滤与排序。
+    onekey_query: String,
     /// `secret_injector` 起飞后到完成/超时之间为 true。OneKey listener 看到
     /// true 直接跳过,避免与自动注入同时弹菜单。
     ssh_secret_auto_injection_in_flight: bool,
@@ -3484,6 +3503,8 @@ impl TerminalView {
             me.handle_menu_event(event, ctx);
         });
 
+        let onekey_search_editor = Self::build_onekey_search_editor(ctx);
+
         let slow_bootstrap_banner = ctx.add_typed_action_view(|_| {
             Banner::<TerminalAction>::new_with_buttons(
                 BannerTextContent::formatted_text(vec![
@@ -3801,6 +3822,8 @@ impl TerminalView {
             context_menu_state: None,
             onekey_prompt_candidates: Vec::new(),
             onekey_last_prompt_at: None,
+            onekey_search_editor,
+            onekey_query: String::new(),
             ssh_secret_auto_injection_in_flight: false,
             context_menu,
             hovered_secret: None,
@@ -15322,12 +15345,172 @@ impl TerminalView {
                     secret: credential.secret,
                 })
                 .collect();
+            view.onekey_query.clear();
+            // 复用常驻 editor:清空内容、把焦点稍后转过来。
+            view.onekey_search_editor.clone().update(ctx, |editor, ctx| {
+                editor.clear_buffer(ctx);
+            });
 
-            let items = view
-                .onekey_prompt_candidates
+            let items = view.build_onekey_menu_items();
+            // 候选可能很多(用户保存了几十/几百台 SSH 服务器),按数量推导
+            // 一个有限高度,并切到 Scrollable,这样方向键导航会自动 scroll-into-view,
+            // 也不会把终端主体盖住。搜索框(pinned header)单独算 ~32px。
+            let candidate_count = view.onekey_prompt_candidates.len() as f32;
+            let target_height = (ONEKEY_SEARCH_HEADER_HEIGHT
+                + candidate_count * ONEKEY_MENU_ROW_HEIGHT)
+                .min(ONEKEY_MENU_MAX_HEIGHT);
+            let search_editor = view.onekey_search_editor.clone();
+            ctx.update_view(&view.context_menu, |context_menu, _| {
+                context_menu.set_menu_variant(MenuVariant::scrollable());
+                context_menu.set_height(target_height);
+                // 搜索框走 pinned header,不占用 selection 索引,也不会被滚动。
+                // 闭包是 Fn,只捕获 ViewHandle clone,不依赖 query —— query 变化
+                // 走 set_items 重建候选行,不重建 header。
+                context_menu.set_pinned_header_builder(move |app| {
+                    render_onekey_search_header(&search_editor, app)
+                });
+            });
+
+            view.show_context_menu(
+                ContextMenuState {
+                    menu_type: ContextMenuType::OneKeyPrompt,
+                },
+                items,
+                ctx,
+            );
+            // 把焦点放到搜索框,这样用户能直接打字过滤候选;
+            // Up/Down/Enter/Escape/Ctrl+N/Ctrl+P 通过 editor 的导航键
+            // propagate 机制转成 EditorEvent 触发对应的菜单操作。
+            ctx.focus(&view.onekey_search_editor);
+            // 默认选中第一条候选(items[0]),保持原 select_next 语义健壮性:
+            // 如果将来在候选前插入 separator 等非 selectable 项,仍能正确跳过。
+            ctx.update_view(&view.context_menu, |context_menu, ctx| {
+                context_menu.select_next(ctx);
+            });
+        });
+    }
+
+    /// 创建 OneKey 菜单顶部的搜索输入框,与 TerminalView 同生命周期。
+    /// 订阅 Edited 触发实时过滤,Up/Down/Enter/Escape 通过 editor 的
+    /// 导航键 propagate 机制转给菜单。Ctrl+N/Ctrl+P 在 EditorView 全局
+    /// 被映射为 EditorAction::Down/Up(见 app/src/editor/view/mod.rs:633,640),
+    /// 因此 single-line + Always 自动 emit Navigate(NavigationKey::Up/Down),
+    /// 无需额外 keymap。
+    fn build_onekey_search_editor(ctx: &mut ViewContext<Self>) -> ViewHandle<EditorView> {
+        let editor = ctx.add_typed_action_view(|ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let mut editor = EditorView::single_line(
+                SingleLineEditorOptions {
+                    text: TextOptions::ui_text(Some(appearance.ui_font_size()), appearance),
+                    select_all_on_focus: false,
+                    clear_selections_on_blur: true,
+                    propagate_and_no_op_vertical_navigation_keys:
+                        PropagateAndNoOpNavigationKeys::Always,
+                    // 让 escape 先 propagate 到 TerminalView 关闭菜单,
+                    // 与 ModelSelector(model_selector.rs:96)对齐——这样
+                    // 即便 vim 模式有 pending 操作,也优先关闭菜单。
+                    propagate_and_no_op_escape_key: PropagateAndNoOpEscapeKey::PropagateFirst,
+                    ..Default::default()
+                },
+                ctx,
+            );
+            editor.set_placeholder_text(crate::t!("terminal-onekey-search-placeholder"), ctx);
+            editor
+        });
+        ctx.subscribe_to_view(&editor, move |me, editor_view, event, ctx| {
+            me.on_onekey_search_editor_event(editor_view, event, ctx);
+        });
+        editor
+    }
+
+    fn on_onekey_search_editor_event(
+        &mut self,
+        editor_view: ViewHandle<EditorView>,
+        event: &EditorEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // 只有当 OneKey 菜单仍然处于打开状态时,这些事件才有意义;
+        // 否则可能是 editor 已被替换/销毁过程中迟到的事件。
+        if !matches!(
+            self.context_menu_state.map(|state| state.menu_type),
+            Some(ContextMenuType::OneKeyPrompt)
+        ) {
+            return;
+        }
+        match event {
+            EditorEvent::Edited(_) => {
+                self.onekey_query = editor_view.as_ref(ctx).buffer_text(ctx);
+                self.refresh_onekey_menu_items(ctx);
+            }
+            EditorEvent::Navigate(NavigationKey::Up) => {
+                ctx.update_view(&self.context_menu, |context_menu, ctx| {
+                    context_menu.select_previous(ctx);
+                });
+            }
+            EditorEvent::Navigate(NavigationKey::Down) => {
+                ctx.update_view(&self.context_menu, |context_menu, ctx| {
+                    context_menu.select_next(ctx);
+                });
+            }
+            EditorEvent::Enter => {
+                let selected_action =
+                    ctx.update_view(&self.context_menu, |context_menu, _| {
+                        context_menu.selected_item().and_then(|item| match item {
+                            MenuItem::Item(fields) => fields.on_select_action().cloned(),
+                            _ => None,
+                        })
+                    });
+                if let Some(TerminalAction::OneKeyFillSecret { index }) = selected_action {
+                    self.fill_onekey_secret(index, ctx);
+                }
+            }
+            EditorEvent::Escape => {
+                // Menu 框架本身也注册了 escape→Close 的 keybinding。如果
+                // EditorView 没有 stop_propagation,close_context_menu 可能
+                // 被调用两次,但 self.context_menu_state.take() 是幂等的,
+                // 第二次进来 state 已经 None,不会重复清理。
+                self.close_context_menu(ctx, true);
+            }
+            _ => {}
+        }
+    }
+
+    /// 按当前 query 用 fuzzy_match 过滤 & 排序候选,重建菜单 items 列表。
+    /// 搜索框走 pinned header,不在 items 列表里;items 第 0 项就是
+    /// 命中的第一条候选(或空态 disabled 行)。
+    fn refresh_onekey_menu_items(&mut self, ctx: &mut ViewContext<Self>) {
+        let items = self.build_onekey_menu_items();
+        ctx.update_view(&self.context_menu, |context_menu, ctx| {
+            context_menu.set_items(items, ctx);
+            // set_items 会 reset_selection;query 变化后默认选中第一条
+            // selectable 候选,方便用户直接回车填充。
+            context_menu.select_next(ctx);
+        });
+        ctx.notify();
+    }
+
+    /// 构建 OneKey 菜单的 items:按当前 query 过滤排序后的候选行,
+    /// 每行的 on_select_action 携带其在全集 `onekey_prompt_candidates`
+    /// 中的索引。搜索框走 `set_pinned_header_builder`,不在 items 列表中。
+    fn build_onekey_menu_items(&self) -> Vec<MenuItem<TerminalAction>> {
+        let order = filter_and_sort_onekey_candidates(
+            self.onekey_prompt_candidates
                 .iter()
-                .enumerate()
-                .map(|(index, candidate)| {
+                .map(|c| (c.label.as_str(), c.subtitle.as_str())),
+            &self.onekey_query,
+        );
+        match order {
+            // 命中为空:加一条 disabled 提示行,避免菜单只剩搜索框
+            // 显得很怪;disabled 会被 select_next/previous 自动跳过。
+            OnekeyMenuRows::NoMatches => vec![
+                MenuItemFields::new(crate::t!("terminal-onekey-search-no-results"))
+                    .with_disabled(true)
+                    .into_item(),
+            ],
+            OnekeyMenuRows::Ordered(indices) => indices
+                .into_iter()
+                .map(|index| {
+                    let candidate = &self.onekey_prompt_candidates[index];
                     MenuItemFields::new_with_stacked_label(
                         candidate.label.clone(),
                         candidate.subtitle.clone(),
@@ -15336,18 +15519,8 @@ impl TerminalView {
                     .with_on_select_action(TerminalAction::OneKeyFillSecret { index })
                     .into_item()
                 })
-                .collect();
-            view.show_context_menu(
-                ContextMenuState {
-                    menu_type: ContextMenuType::OneKeyPrompt,
-                },
-                items,
-                ctx,
-            );
-            ctx.update_view(&view.context_menu, |context_menu, ctx| {
-                context_menu.select_next(ctx);
-            });
-        });
+                .collect(),
+        }
     }
 
     fn fill_onekey_secret(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
@@ -18247,6 +18420,19 @@ impl TerminalView {
         if let Some(state) = self.context_menu_state.take() {
             if matches!(state.menu_type, ContextMenuType::OneKeyPrompt) {
                 self.onekey_prompt_candidates.clear();
+                self.onekey_query.clear();
+                // 搜索 editor 是常驻字段(框架未提供 view 释放 API),
+                // 这里清空其内容以便下次打开时是干净状态。
+                self.onekey_search_editor.clone().update(ctx, |editor, ctx| {
+                    editor.clear_buffer(ctx);
+                });
+                // 该 `Menu` 实例被各类 ContextMenu 共用,关闭 OneKey 菜单时
+                // 把 variant 切回 Fixed 并清掉 pinned header,避免影响后续
+                // 右键 / Alt-screen 菜单。
+                ctx.update_view(&self.context_menu, |context_menu, _| {
+                    context_menu.set_menu_variant(MenuVariant::Fixed);
+                    context_menu.clear_pinned_header_builder();
+                });
             }
             ctx.notify();
             if should_redetermine_focus {
@@ -25042,6 +25228,79 @@ fn command_first_word_and_suffix(command: &str) -> Option<(&str, &str)> {
     let word_start = command.find(first_word)?;
     let rest = &command[word_start + first_word.len()..];
     Some((first_word, rest))
+}
+
+/// `filter_and_sort_onekey_candidates` 的返回值。命中为空时与"全部命中"
+/// 区分开,方便调用方决定显示空态行还是候选行。
+#[derive(Debug, PartialEq, Eq)]
+enum OnekeyMenuRows {
+    /// 候选在 onekey_prompt_candidates 全集中的索引,按显示顺序排列。
+    Ordered(Vec<usize>),
+    /// query 非空但没有任何候选命中。
+    NoMatches,
+}
+
+/// 按 query 用 fuzzy_match 过滤+排序 OneKey 候选,返回展示顺序中的全集索引。
+/// query 为空时保持原顺序;非空时对 label / subtitle 各打分,取最高分降序。
+/// 提取为 pure 函数以便单元测试(skim 算法对 Unicode char 序列匹配,
+/// 中/英/日/韩字符均可直接搜索)。
+fn filter_and_sort_onekey_candidates<'a, I>(candidates: I, query: &str) -> OnekeyMenuRows
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let query = query.trim();
+    let candidates: Vec<(&str, &str)> = candidates.into_iter().collect();
+    if query.is_empty() {
+        return OnekeyMenuRows::Ordered((0..candidates.len()).collect());
+    }
+    let mut scored: Vec<(i64, usize)> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (label, subtitle))| {
+            let label_score = match_indices_case_insensitive(label, query).map(|m| m.score);
+            let subtitle_score =
+                match_indices_case_insensitive(subtitle, query).map(|m| m.score);
+            let score = label_score.into_iter().chain(subtitle_score).max()?;
+            Some((score, index))
+        })
+        .collect();
+    // score 大者靠前;同分按原始顺序(stable sort)。
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    if scored.is_empty() {
+        OnekeyMenuRows::NoMatches
+    } else {
+        OnekeyMenuRows::Ordered(scored.into_iter().map(|(_, index)| index).collect())
+    }
+}
+
+/// 渲染 OneKey 菜单顶部的搜索 header(pinned header builder 调用)。
+/// 提取为模块级函数以避免在 query 变化时反复构造 Arc 闭包。
+fn render_onekey_search_header(
+    editor: &ViewHandle<EditorView>,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let search_icon = ConstrainedBox::new(
+        icons::Icon::SearchSmall
+            .to_warpui_icon(theme.sub_text_color(theme.surface_2()))
+            .finish(),
+    )
+    .with_width(16.)
+    .with_height(16.)
+    .finish();
+    let search_row = Flex::row()
+        .with_child(Container::new(search_icon).with_margin_right(8.).finish())
+        .with_child(Shrinkable::new(1., ChildView::new(editor).finish()).finish())
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .finish();
+    Container::new(search_row)
+        .with_padding_left(8.)
+        .with_padding_right(8.)
+        .with_padding_top(6.)
+        .with_padding_bottom(6.)
+        .with_border(Border::bottom(1.).with_border_fill(theme.surface_3()))
+        .finish()
 }
 
 /// Conditionally wrap a terminal element (altscreen / blocklist element) in a scrollable element.
