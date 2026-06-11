@@ -9,10 +9,9 @@ use warpui::elements::{
     Flex, Hoverable, MainAxisSize, MouseStateHandle, ParentElement, ScrollbarWidth, Text,
 };
 use warpui::platform::Cursor;
-use warpui::{AppContext, Entity, TypedActionView, View, ViewContext};
+use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext};
 
 use warp_editor::content::heading_outline::HeadingOutlineEntry;
-use warp_editor::content::text::BlockHeaderSize;
 
 // ---- 视觉常量 ----
 /// 每级标题的左缩进像素。
@@ -87,7 +86,7 @@ impl MarkdownOutlinePanel {
         let indent = (level_usize.saturating_sub(1)) as f32 * HEADING_INDENT_PX;
 
         let label = Text::new_inline(
-            &entry.title,
+            entry.title.clone(),
             appearance.ui_font_family(),
             appearance.ui_font_subheading(),
         )

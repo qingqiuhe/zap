@@ -2,4 +2,4 @@
 
 pub mod panel;
 
-pub use panel::{MarkdownOutlinePanel, MarkdownOutlinePanelAction, MarkdownOutlinePanelEvent};
+pub use panel::{MarkdownOutlinePanel, MarkdownOutlinePanelEvent};

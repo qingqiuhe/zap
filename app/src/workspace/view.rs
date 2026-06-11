@@ -15710,6 +15710,7 @@ impl Workspace {
                         ToolPanelView::SkillManager => {
                             crate::t!("workspace-left-panel-skill-manager")
                         }
+                        ToolPanelView::MarkdownOutline => "Markdown Outline".to_string(),
                     }
                 } else {
                     crate::t!("workspace-tools-panel-tooltip")
@@ -15779,6 +15780,7 @@ impl Workspace {
                 ToolPanelView::SkillManager => {
                     crate::t!("workspace-left-panel-skill-manager")
                 }
+                ToolPanelView::MarkdownOutline => "Markdown Outline".to_string(),
             }
         } else {
             crate::t!("workspace-tools-panel-tooltip")

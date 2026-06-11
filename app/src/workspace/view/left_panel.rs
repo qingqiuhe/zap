@@ -1321,6 +1321,7 @@ impl View for LeftPanelView {
                 ToolPanelView::SshManager => ctx.focus(&self.ssh_manager_view),
                 ToolPanelView::ServerFileBrowser => ctx.focus(&self.server_file_browser_view),
                 ToolPanelView::SkillManager => ctx.focus(&self.skill_manager_view),
+                ToolPanelView::MarkdownOutline => ctx.focus(&self.markdown_outline_view),
             }
         }
     }
