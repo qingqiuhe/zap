@@ -1,0 +1,54 @@
+name: Build macOS arm64 DMG
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CHANNEL: oss
+  NO_LICENSES: "1"
+
+jobs:
+  build:
+    name: Build unsigned arm64 DMG
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: macos
+          cache_key: macos-arm64-dmg
+          is_self_hosted: false
+          install_release_deps: false
+
+      - name: Ensure arm64 Rust target is installed
+        shell: bash
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Install cargo-bundle
+        shell: bash
+        run: script/install_cargo_bundle
+
+      - name: Install create-dmg
+        shell: bash
+        run: brew install create-dmg
+
+      - name: Build unsigned arm64 DMG
+        id: bundle_app
+        shell: bash
+        run: |
+          script/bundle --channel "$CHANNEL" --arch aarch64 --dmg-name-suffix arm64 --nosign
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zap-macos-arm64-dmg
+          path: ${{ steps.bundle_app.outputs.dmg_path }}
+          if-no-files-found: error
+          retention-days: 7
