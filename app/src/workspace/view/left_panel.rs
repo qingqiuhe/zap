@@ -25,6 +25,8 @@ use crate::code::editor_management::CodeSource;
 use crate::code::file_tree::FileTreeEvent;
 use crate::coding_panel_enablement_state::CodingPanelEnablementState;
 use crate::drive::panel::{DrivePanel, DrivePanelEvent};
+use crate::markdown_outline::{MarkdownOutlinePanel, MarkdownOutlinePanelEvent};
+use warp_editor::content::heading_outline::HeadingOutlineEntry;
 use crate::pane_group::working_directories::WorkingDirectory;
 use crate::pane_group::{PaneGroup, WorkingDirectoriesEvent, WorkingDirectoriesModel};
 #[cfg(feature = "local_fs")]
@@ -50,10 +52,11 @@ use crate::workspace::view::server_file_browser::{
 };
 use crate::workspace::view::{
     LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
-    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_SKILL_MANAGER_BINDING_NAME,
-    LEFT_PANEL_SSH_MANAGER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
-    OPEN_GLOBAL_SEARCH_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
+    LEFT_PANEL_MARKDOWN_OUTLINE_BINDING_NAME, LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME,
+    LEFT_PANEL_SKILL_MANAGER_BINDING_NAME, LEFT_PANEL_SSH_MANAGER_BINDING_NAME,
+    LEFT_PANEL_WARP_DRIVE_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
+    TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME, TOGGLE_PROJECT_EXPLORER_BINDING_NAME,
+    TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
 use crate::{
     appearance::Appearance,
@@ -80,6 +83,7 @@ struct MouseStateHandles {
     ssh_manager_button: MouseStateHandle,
     server_file_browser_button: MouseStateHandle,
     skill_manager_button: MouseStateHandle,
+    markdown_outline_button: MouseStateHandle,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +95,7 @@ pub enum LeftPanelAction {
     SshManager,
     ServerFileBrowser,
     SkillManager,
+    MarkdownOutline,
 }
 
 pub enum LeftPanelEvent {
@@ -134,6 +139,10 @@ pub enum LeftPanelEvent {
         node_id: String,
         server: warp_ssh_manager::SshServerInfo,
     },
+    /// 用户在 Markdown 大纲面板点击标题 → 主窗口跳转到对应偏移。
+    JumpToMarkdownOffset {
+        offset: string_offset::CharOffset,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +154,7 @@ pub enum ToolPanelView {
     SshManager,
     ServerFileBrowser,
     SkillManager,
+    MarkdownOutline,
 }
 
 /// Encapsulates the active view state to enforce that all mutations go through
@@ -214,6 +224,7 @@ pub struct LeftPanelView {
     ssh_manager_view: ViewHandle<SshManagerPanel>,
     server_file_browser_view: ViewHandle<ServerFileBrowserView>,
     skill_manager_view: ViewHandle<SkillManagerPanel>,
+    markdown_outline_view: ViewHandle<MarkdownOutlinePanel>,
     active_view: active_view_state::ActiveViewState,
     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
     active_pane_group: Option<WeakViewHandle<PaneGroup>>,
@@ -261,6 +272,7 @@ impl LeftPanelView {
         let ssh_manager_view = ctx.add_typed_action_view(SshManagerPanel::new);
         let server_file_browser_view = ctx.add_typed_action_view(ServerFileBrowserView::new);
         let skill_manager_view = ctx.add_typed_action_view(SkillManagerPanel::new);
+        let markdown_outline_view = ctx.add_typed_action_view(MarkdownOutlinePanel::new);
         ctx.subscribe_to_view(&ssh_manager_view, |_me, _, event, ctx| {
             use crate::ssh_manager::SshManagerPanelEvent;
             match event {
@@ -320,6 +332,12 @@ impl LeftPanelView {
                     conversation_title: conversation_title.clone(),
                     terminal_view_id: *terminal_view_id,
                 });
+            }
+        });
+
+        ctx.subscribe_to_view(&markdown_outline_view, |_me, _, event, ctx| match event {
+            MarkdownOutlinePanelEvent::JumpToOffset { offset } => {
+                ctx.emit(LeftPanelEvent::JumpToMarkdownOffset { offset: *offset });
             }
         });
 
@@ -401,6 +419,7 @@ impl LeftPanelView {
             ssh_manager_view,
             server_file_browser_view,
             skill_manager_view,
+            markdown_outline_view,
             active_view: active_view_state::new(active_view),
             toolbelt_buttons,
             active_pane_group: None,
@@ -443,6 +462,7 @@ impl LeftPanelView {
                 (ToolPanelView::SshManager, ToolPanelView::SshManager) => true,
                 (ToolPanelView::ServerFileBrowser, ToolPanelView::ServerFileBrowser) => true,
                 (ToolPanelView::SkillManager, ToolPanelView::SkillManager) => true,
+                (ToolPanelView::MarkdownOutline, ToolPanelView::MarkdownOutline) => true,
                 _ => std::mem::discriminant(v) == std::mem::discriminant(&current_view),
             }
         });
@@ -572,6 +592,18 @@ impl LeftPanelView {
                     tooltip_keybinding_names,
                 }
             }
+            ToolPanelView::MarkdownOutline => {
+                let tooltip_keybinding_names = vec![LEFT_PANEL_MARKDOWN_OUTLINE_BINDING_NAME];
+                ToolbeltButtonConfig {
+                    icon: Icon::HeaderBlock,
+                    active_icon: None,
+                    tooltip_text: "Markdown Outline".to_string(),
+                    action: LeftPanelAction::MarkdownOutline,
+                    render_with_active_state: false,
+                    tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
+                    tooltip_keybinding_names,
+                }
+            }
         }
     }
 
@@ -674,6 +706,17 @@ impl LeftPanelView {
     ) {
         self.server_file_browser_view.update(ctx, |view, ctx| {
             view.navigate_to_remote_path(host_id, path, ctx);
+        });
+    }
+
+    /// 更新 Markdown 大纲面板的标题条目。
+    pub fn update_markdown_outline(
+        &self,
+        entries: Vec<HeadingOutlineEntry>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.markdown_outline_view.update(ctx, |panel, ctx| {
+            panel.update_entries(entries, ctx);
         });
     }
 
@@ -850,6 +893,9 @@ impl LeftPanelView {
             ToolPanelView::SkillManager => {
                 ctx.focus(&self.skill_manager_view);
             }
+            ToolPanelView::MarkdownOutline => {
+                ctx.focus(&self.markdown_outline_view);
+            }
         }
     }
 
@@ -1017,6 +1063,9 @@ impl LeftPanelView {
                 LeftPanelAction::SkillManager => {
                     self.active_view.get() == ToolPanelView::SkillManager
                 }
+                LeftPanelAction::MarkdownOutline => {
+                    self.active_view.get() == ToolPanelView::MarkdownOutline
+                }
             };
         }
     }
@@ -1166,6 +1215,9 @@ impl LeftPanelView {
             }
             LeftPanelAction::SkillManager => {
                 active_view_state::set(self, ToolPanelView::SkillManager, ctx);
+            }
+            LeftPanelAction::MarkdownOutline => {
+                active_view_state::set(self, ToolPanelView::MarkdownOutline, ctx);
             }
         }
     }
@@ -1363,6 +1415,14 @@ impl View for LeftPanelView {
             ToolPanelView::SkillManager => Shrinkable::new(
                 1.0,
                 Container::new(ChildView::new(&self.skill_manager_view).finish())
+                    .with_padding_left(2.)
+                    .with_padding_right(2.)
+                    .finish(),
+            )
+            .finish(),
+            ToolPanelView::MarkdownOutline => Shrinkable::new(
+                1.0,
+                Container::new(ChildView::new(&self.markdown_outline_view).finish())
                     .with_padding_left(2.)
                     .with_padding_right(2.)
                     .finish(),

@@ -581,6 +581,8 @@ pub(crate) const LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME: &str =
     "workspace:left_panel_agent_conversations";
 pub(crate) const LEFT_PANEL_SSH_MANAGER_BINDING_NAME: &str = "workspace:left_panel_ssh_manager";
 pub(crate) const LEFT_PANEL_SKILL_MANAGER_BINDING_NAME: &str = "workspace:left_panel_skill_manager";
+pub(crate) const LEFT_PANEL_MARKDOWN_OUTLINE_BINDING_NAME: &str =
+    "workspace:left_panel_markdown_outline";
 
 const KEYBINDINGS_TO_CACHE: [&str; 4] = [
     ASK_AI_ASSISTANT_KEYBINDING_NAME,
@@ -3521,6 +3523,7 @@ impl Workspace {
                 LeftPanelDisplayedTab::SshManager => ToolPanelView::SshManager,
                 LeftPanelDisplayedTab::ServerFileBrowser => ToolPanelView::ServerFileBrowser,
                 LeftPanelDisplayedTab::SkillManager => ToolPanelView::SkillManager,
+                LeftPanelDisplayedTab::MarkdownOutline => ToolPanelView::MarkdownOutline,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
             lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
@@ -5297,6 +5300,11 @@ impl Workspace {
             }
             LeftPanelEvent::OpenSftpPane { node_id, server: _ } => {
                 self.open_sftp_pane(node_id.clone(), ctx);
+            }
+            LeftPanelEvent::JumpToMarkdownOffset { offset } => {
+                // TODO: 通过 active pane group 找到当前焦点的 FileNotebookView,
+                // 并调用 autoscroll 跳转到指定偏移位置。
+                let _ = offset;
             }
         }
     }
@@ -12220,6 +12228,11 @@ impl Workspace {
             }
             pane_group::Event::ActiveSessionChanged => {
                 self.update_active_session(ctx);
+                // 切换 pane 时清空 Markdown 大纲,避免显示旧文件的条目。
+                // 如果新 pane 是 FileNotebook,加载事件会重新填充。
+                self.left_panel_view.update(ctx, |lp, ctx| {
+                    lp.update_markdown_outline(vec![], ctx);
+                });
                 // ctx.notify();
             }
             pane_group::Event::Escape => {
@@ -13328,6 +13341,11 @@ impl Workspace {
                         code_review_view.expand_comment_list(ctx);
                     });
                 }
+            }
+            pane_group::Event::MarkdownOutlineChanged(entries) => {
+                self.left_panel_view.update(ctx, |lp, ctx| {
+                    lp.update_markdown_outline(entries.clone(), ctx);
+                });
             }
         }
     }
@@ -18433,6 +18451,8 @@ impl Workspace {
         if cfg!(feature = "local_fs") {
             views.push(ToolPanelView::SkillManager);
         }
+        // Markdown 大纲面板,始终显示。
+        views.push(ToolPanelView::MarkdownOutline);
         views
     }
 
