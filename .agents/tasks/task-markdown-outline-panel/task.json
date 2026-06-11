@@ -1,0 +1,14 @@
+{
+  "task_id": "task-markdown-outline-panel",
+  "task_description": "Add a MarkdownOutline Tool Panel to the left sidebar that displays document headings when a Markdown file is open. Includes: heading data extraction from Buffer, panel UI with indentation and click-to-jump, full Tool Panel integration and registration, data flow from FileNotebookView to panel on file load/switch, and scroll-to-offset on heading click.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "pass",
+    "tests": "pass",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "cargo check -p warp_editor passes. cargo check -p warp has zero error[E] from our changes (only pre-existing protoc issue in unrelated dependency). All 4 heading_outline tests pass."
+  }
+}
