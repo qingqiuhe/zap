@@ -5302,9 +5302,18 @@ impl Workspace {
                 self.open_sftp_pane(node_id.clone(), ctx);
             }
             LeftPanelEvent::JumpToMarkdownOffset { offset } => {
-                // TODO: 通过 active pane group 找到当前焦点的 FileNotebookView,
-                // 并调用 autoscroll 跳转到指定偏移位置。
-                let _ = offset;
+                use crate::pane_group::FilePane;
+                let pane_group = self.active_tab_pane_group().clone();
+                let focused_id = pane_group.as_ref(ctx).focused_pane_id(ctx);
+                let file_view = pane_group
+                    .as_ref(ctx)
+                    .downcast_pane_by_id::<FilePane>(focused_id)
+                    .map(|file_pane| file_pane.file_view(ctx));
+                if let Some(file_view) = file_view {
+                    file_view.update(ctx, |view, ctx| {
+                        view.scroll_to_offset(*offset, ctx);
+                    });
+                }
             }
         }
     }

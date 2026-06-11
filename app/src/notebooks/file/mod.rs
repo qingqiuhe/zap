@@ -336,6 +336,23 @@ impl FileNotebookView {
         });
     }
 
+    /// 滚动编辑器到指定偏移位置（用于大纲面板点击跳转）。
+    pub fn scroll_to_offset(&self, offset: string_offset::CharOffset, ctx: &mut ViewContext<Self>) {
+        use warp_editor::render::model::AutoScrollMode;
+        let render_state = self
+            .editor
+            .as_ref(ctx)
+            .model()
+            .as_ref(ctx)
+            .render_state()
+            .clone();
+        render_state.update(ctx, |rs, _ctx| {
+            rs.request_autoscroll_to(AutoScrollMode::ScrollOffsetsIntoViewport(
+                offset..offset + string_offset::CharOffset::from(1),
+            ));
+        });
+    }
+
     #[cfg(feature = "local_fs")]
     fn open_telemetry_metadata(&self, ctx: &ViewContext<Self>) -> NotebookTelemetryMetadata {
         NotebookTelemetryMetadata::new(None, None, NotebookLocation::LocalFile, None)
