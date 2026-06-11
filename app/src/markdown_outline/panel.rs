@@ -5,8 +5,8 @@
 use string_offset::CharOffset;
 use warp_core::ui::appearance::Appearance;
 use warpui::elements::{
-    ClippedScrollStateHandle, Container, CrossAxisAlignment, Element, Empty, Flex, Hoverable,
-    MainAxisSize, MouseStateHandle, ParentElement, Text,
+    ClippedScrollStateHandle, ClippedScrollable, Container, CrossAxisAlignment, Element, Fill,
+    Flex, Hoverable, MainAxisSize, MouseStateHandle, ParentElement, ScrollbarWidth, Text,
 };
 use warpui::platform::Cursor;
 use warpui::{AppContext, Entity, TypedActionView, View, ViewContext};
@@ -46,7 +46,6 @@ pub struct MarkdownOutlinePanel {
     #[allow(dead_code)]
     active_index: Option<usize>,
     /// 滚动状态。
-    #[allow(dead_code)]
     scroll_state: ClippedScrollStateHandle,
     /// 每行的鼠标悬停状态(按索引缓存)。
     row_states: Vec<MouseStateHandle>,
@@ -182,6 +181,18 @@ impl View for MarkdownOutlinePanel {
             col.add_child(self.render_row(i, entry, appearance));
         }
 
-        col.finish()
+        let theme = appearance.theme();
+        let scrollbar_color = theme.disabled_text_color(theme.background()).into();
+        let scrollbar_thumb_hover = theme.main_text_color(theme.background()).into();
+
+        ClippedScrollable::vertical(
+            self.scroll_state.clone(),
+            col.finish(),
+            ScrollbarWidth::Auto,
+            scrollbar_color,
+            scrollbar_thumb_hover,
+            Fill::None,
+        )
+        .finish()
     }
 }

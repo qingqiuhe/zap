@@ -489,6 +489,17 @@ impl FileNotebookView {
                         FileModelEvent::FileUpdated { content, .. } => {
                             let cleaned = post_process_notebook(content);
                             me.set_content(&cleaned, ctx);
+
+                            // 文件外部更新后重新提取大纲。
+                            let entries = me
+                                .editor
+                                .as_ref(ctx)
+                                .model()
+                                .as_ref(ctx)
+                                .content()
+                                .as_ref(ctx)
+                                .heading_outline();
+                            ctx.emit(FileNotebookEvent::OutlineChanged(entries));
                         }
                         FileModelEvent::FileSaved { .. } | FileModelEvent::FailedToSave { .. } => {}
                     }
