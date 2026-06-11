@@ -5,6 +5,7 @@ mod cursor;
 pub mod diff;
 pub mod edit;
 pub mod find;
+pub mod heading_outline;
 pub mod hidden_lines_model;
 pub mod markdown;
 pub mod mermaid_diagram;

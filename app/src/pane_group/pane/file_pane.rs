@@ -112,6 +112,11 @@ impl PaneContent for FilePane {
                 FileNotebookEvent::FileLoaded => {
                     ctx.emit(crate::pane_group::Event::AppStateChanged)
                 }
+                FileNotebookEvent::OutlineChanged(entries) => {
+                    ctx.emit(crate::pane_group::Event::MarkdownOutlineChanged(
+                        entries.clone(),
+                    ))
+                }
                 #[cfg(feature = "local_fs")]
                 FileNotebookEvent::OpenFileWithTarget {
                     path,

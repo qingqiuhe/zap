@@ -46,6 +46,7 @@ mod input_classifier;
 mod interval_timer;
 mod linear;
 mod local_managed_secrets;
+mod markdown_outline;
 mod menu;
 mod modal;
 mod network;

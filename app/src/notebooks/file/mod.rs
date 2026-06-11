@@ -115,6 +115,8 @@ pub enum FileNotebookEvent {
     },
     TitleUpdated,
     FileLoaded,
+    /// Markdown 大纲变更,携带当前文件的标题条目列表。
+    OutlineChanged(Vec<warp_editor::content::heading_outline::HeadingOutlineEntry>),
     Pane(PaneEvent),
     #[cfg(feature = "local_fs")]
     OpenFileWithTarget {
@@ -334,6 +336,23 @@ impl FileNotebookView {
         });
     }
 
+    /// 滚动编辑器到指定偏移位置（用于大纲面板点击跳转）。
+    pub fn scroll_to_offset(&self, offset: string_offset::CharOffset, ctx: &mut ViewContext<Self>) {
+        use warp_editor::render::model::AutoScrollMode;
+        let render_state = self
+            .editor
+            .as_ref(ctx)
+            .model()
+            .as_ref(ctx)
+            .render_state()
+            .clone();
+        render_state.update(ctx, |rs, _ctx| {
+            rs.request_autoscroll_to(AutoScrollMode::ScrollOffsetsIntoViewport(
+                offset..offset + string_offset::CharOffset::from(1),
+            ));
+        });
+    }
+
     #[cfg(feature = "local_fs")]
     fn open_telemetry_metadata(&self, ctx: &ViewContext<Self>) -> NotebookTelemetryMetadata {
         NotebookTelemetryMetadata::new(None, None, NotebookLocation::LocalFile, None)
@@ -441,6 +460,17 @@ impl FileNotebookView {
 
                             // Trigger to save the open file path for session restoration.
                             ctx.emit(FileNotebookEvent::FileLoaded);
+
+                            // 提取 Markdown 标题大纲并通知外部。
+                            let entries = me
+                                .editor
+                                .as_ref(ctx)
+                                .model()
+                                .as_ref(ctx)
+                                .content()
+                                .as_ref(ctx)
+                                .heading_outline();
+                            ctx.emit(FileNotebookEvent::OutlineChanged(entries));
                         }
                         FileModelEvent::FailedToLoad { error, .. } => {
                             safe_warn!(
@@ -459,6 +489,17 @@ impl FileNotebookView {
                         FileModelEvent::FileUpdated { content, .. } => {
                             let cleaned = post_process_notebook(content);
                             me.set_content(&cleaned, ctx);
+
+                            // 文件外部更新后重新提取大纲。
+                            let entries = me
+                                .editor
+                                .as_ref(ctx)
+                                .model()
+                                .as_ref(ctx)
+                                .content()
+                                .as_ref(ctx)
+                                .heading_outline();
+                            ctx.emit(FileNotebookEvent::OutlineChanged(entries));
                         }
                         FileModelEvent::FileSaved { .. } | FileModelEvent::FailedToSave { .. } => {}
                     }

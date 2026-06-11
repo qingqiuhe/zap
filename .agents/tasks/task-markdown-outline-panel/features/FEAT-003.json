@@ -1,0 +1,24 @@
+{
+  "id": "FEAT-003",
+  "type": "fix",
+  "description": "Post-review fixes: (1) Emit outline on content changes (FileUpdated), (2) Add ClippedScrollable scroll wrapper to panel render, (3) Remove unused Empty import and wire up scroll_state.",
+  "status": "completed",
+  "steps": [
+    "In app/src/notebooks/file/mod.rs: After set_content() in the FileUpdated handler, extract headings and emit OutlineChanged, matching the pattern in FileLoaded.",
+    "In app/src/markdown_outline/panel.rs: Replace the direct col.finish() in render() with a ClippedScrollable::vertical() wrapper using self.scroll_state.",
+    "In app/src/markdown_outline/panel.rs: Remove unused Empty import and remove #[allow(dead_code)] from scroll_state since it is now used."
+  ],
+  "acceptance_criteria": [
+    "cargo check -p warp_editor passes",
+    "cargo check -p warp 2>&1 | grep 'error\\[E' shows no errors from our changes",
+    "OutlineChanged is emitted after FileUpdated sets content",
+    "Panel render wraps heading list in ClippedScrollable::vertical",
+    "No unused imports remain in panel.rs"
+  ],
+  "verification": [
+    "Run cargo check -p warp_editor",
+    "Run cargo check -p warp 2>&1 | grep 'error\\[E'"
+  ],
+  "blocked_reason": null,
+  "findings": "All three review issues addressed. cargo check -p warp_editor passes. cargo check -p warp shows zero error[E] from our changes. All 4 heading_outline tests pass. ClippedScrollable::vertical used with ScrollbarWidth::Auto and theme colors for scrollbar appearance. FileUpdated now re-extracts and emits outline after set_content."
+}

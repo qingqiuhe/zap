@@ -689,6 +689,8 @@ pub enum Event {
     },
     #[cfg(not(target_family = "wasm"))]
     OpenPluginInstructionsPane(crate::terminal::CLIAgent, PluginModalKind),
+    /// Markdown 文件大纲变更,通知 workspace 更新左面板。
+    MarkdownOutlineChanged(Vec<warp_editor::content::heading_outline::HeadingOutlineEntry>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
